@@ -1,1 +1,7 @@
 
+flet==0.23.2
+yfinance==0.2.40
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+upstash-redis==1.0.0
