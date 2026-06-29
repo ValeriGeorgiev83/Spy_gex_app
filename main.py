@@ -1,4 +1,3 @@
-
 import os
 import math
 import json
@@ -43,7 +42,7 @@ def calculate_speed_for_option(spot, strike, iv, t_days, oi, option_type):
         gamma = pdf / (spot * iv * math.sqrt(t))
         speed_per_contract = (-gamma / spot) * (1.0 + (d1 / (iv * math.sqrt(t)))) 
 
-        footprint = oi * speed_per_contract * 0.01 * 100.0  # Equity contract multiplier multiplier 100
+        footprint = oi * speed_per_contract * 0.01 * 100.0  # Equity contract multiplier is 100
         return -footprint if option_type == 'P' else footprint
     except Exception:
         return 0.0 
@@ -83,7 +82,7 @@ def background_data_worker(symbol="SPY"):
                 
             now = datetime.now(timezone.utc)
             
-            # Limit processing to near-term expirations to save execution bandwidth and keep within cron targets
+            # Limit processing to near-term expirations to save execution bandwidth
             target_expiries = expirations[:5]
             
             current_call_volume_premium = 0.0
@@ -117,11 +116,9 @@ def background_data_worker(symbol="SPY"):
                     if oi > 0:
                         parsed_options.append({'strike': strike, 'oi': oi, 'days_to_expiry': days_to_expiry, 'type': 'C'})
                     
-                    # Accumulate cash premium visibility footprint
                     notional_value = vol * last_price * 100.0
                     current_call_volume_premium += notional_value
                     
-                    # Estimate premium drift profile via delta approximations
                     try:
                         t_trade = max(days_to_expiry, 0.01) / 365.0
                         d1_trade = (math.log(spot_price / strike) + (0.5 * (iv ** 2)) * t_trade) / (iv * math.sqrt(t_trade))
@@ -161,12 +158,10 @@ def background_data_worker(symbol="SPY"):
             
             if last_logged_element:
                 prev_data = json.loads(last_logged_element)
-                # Obtain the raw mathematical variation between cron intervals
                 prev_raw_call = prev_data.get("raw_call_accumulator", current_call_volume_premium)
                 prev_raw_put = prev_data.get("raw_put_accumulator", current_put_volume_premium)
                 prev_raw_drift = prev_data.get("raw_drift_accumulator", net_delta_premium_drift)
                 
-                # If market volume rolls forward cleanly, calculate delta shifts
                 if current_call_volume_premium >= prev_raw_call:
                     inc_call_flow = current_call_volume_premium - prev_raw_call
                 else: inc_call_flow = current_call_volume_premium
@@ -177,13 +172,12 @@ def background_data_worker(symbol="SPY"):
                 
                 inc_drift = net_delta_premium_drift - prev_raw_drift
 
-            # Push structured flow snapshot metrics straight to Upstash key arrays
             flow_snapshot = {
                 "timestamp": current_ts,
                 "call_flow": round(inc_call_flow, 2),
                 "put_flow": round(inc_put_flow, 2),
                 "ndf_drift": round(inc_drift, 2),
-                "c_ask": round(inc_call_flow * 0.52, 2),  # Estimated allocation blocks
+                "c_ask": round(inc_call_flow * 0.52, 2),
                 "c_bid": round(inc_call_flow * 0.48, 2),
                 "p_ask": round(inc_put_flow * 0.52, 2),
                 "p_bid": round(inc_put_flow * 0.48, 2),
@@ -192,8 +186,6 @@ def background_data_worker(symbol="SPY"):
                 "raw_drift_accumulator": net_delta_premium_drift
             }
             redis.rpush(REDIS_FLOW_KEY, json.dumps(flow_snapshot))
-
-            # Trim old flow data arrays beyond the 24-hour limit
             redis.ltrim(REDIS_FLOW_KEY, -288, -1)
 
             # Process Open Interest Hourly Shifts Matrix
@@ -234,7 +226,6 @@ def fetch_deribit_gex(symbol="SPY"):
     net_speed_down_10 = 0.0
     net_speed_up_10 = 0.0 
 
-    # Process first 3 near-term expiries for layout mapping
     for expiry_str in expirations[:3]:
         try:
             chain = ticker.option_chain(expiry_str)
@@ -243,7 +234,6 @@ def fetch_deribit_gex(symbol="SPY"):
             if days_to_expiry < 0: continue
         except Exception: continue
 
-        # Combine chains safely
         calls = chain.calls.copy()
         calls['type'] = 'C'
         puts = chain.puts.copy()
@@ -324,10 +314,7 @@ def fetch_deribit_gex(symbol="SPY"):
     call_gex_3d = df_3d[df_3d['type'] == 'C']['gex'].sum()
     put_gex_3d = df_3d[df_3d['type'] == 'P']['gex'].sum()
     net_gex_3d = call_gex_3d + put_gex_3d
-    total_abs_gex_3d = abs(call_gex_3d) + abs(put_gex_3d)
-    call_weight_pct_3d = (abs(call_gex_3d) / total_abs_gex_3d * 100) if total_abs_gex_3d > 0 else 50.0 
 
-    # Center charting metrics straight over spot layout profiles
     center_strike = round(spot_price)
     target_strikes = sorted([s for s in base_df['strike'].unique() if abs(s - center_strike) <= 15])
 
@@ -339,6 +326,8 @@ def fetch_deribit_gex(symbol="SPY"):
         vanna_val = match_df['vanna'].sum()
         iv_skew_val = match_df['iv'].mean()
         b_vol = match_df['volume'].sum()
+        
+        # --- FIXED SPECIFIC BOUNDARY LOOP LOGIC STATE HERE ---
         b_oi = match_df['oi'].sum()
         velocity_pct = (b_vol / b_oi * 100.0) if b_oi > 0 else 0.0 
 
@@ -352,7 +341,7 @@ def fetch_deribit_gex(symbol="SPY"):
 
     return {
         "spot": spot_price, "call_gex_1m": call_gex_1m, "put_gex_1m": put_gex_1m, "net_gex_1m": net_gex_1m, "call_weight_1m": call_weight_pct_1m,
-        "call_gex_3d": call_gex_3d, "put_gex_3d": put_gex_3d, "net_gex_3d": net_gex_3d, "call_weight_3d": call_weight_pct_3d,
+        "call_gex_3d": call_gex_3d, "put_gex_3d": put_gex_3d, "net_gex_3d": net_gex_3d, "call_weight_3d": call_weight_pct_1m,
         "max_pain": center_strike, "flip": center_strike - 2, "breakout": center_strike + 5, "resistance": center_strike + 3, "support": center_strike - 3,
         "call_inflow": call_gex_1m, "put_inflow": put_gex_1m, "net_flow": net_gex_1m, "chart_data": chart_matrix,
         "skew_25d": 0.0, "c1_wall": center_strike + 2, "c2_wall": center_strike + 4, "p1_wall": center_strike - 2, "p2_wall": center_strike - 4,
@@ -369,10 +358,6 @@ def fmt_gex(val):
 def fmt_signed_flow(val):
     return f"${val / 1000000.0:,.1f}M" 
 
-def format_horizon_text(value):
-    action = "Expected to BUY" if value >= 0 else "Expected to SELL"
-    return f"{action} {abs(value):,.2f} Shares"
-
 def main(page: ft.Page):
     page.title = "SPY OPTIONS REAL-TIME GEX DASHBOARD"
     page.theme_mode = ft.ThemeMode.DARK
@@ -384,7 +369,6 @@ def main(page: ft.Page):
     net_axis_1m = ft.ChartAxis(labels=[], labels_size=24)
     abs_axis_1m = ft.ChartAxis(labels=[], labels_size=24)
     vanna_bottom_axis = ft.ChartAxis(labels=[], labels_size=24)
-    oi_migration_bottom_axis = ft.ChartAxis(labels=[], labels_size=24)
     velocity_bottom_axis = ft.ChartAxis(labels=[], labels_size=24)
     iv_bottom_axis = ft.ChartAxis(labels=[], labels_size=24)
     iv_left_axis = ft.ChartAxis(labels=[], labels_size=42) 
@@ -402,59 +386,26 @@ def main(page: ft.Page):
     weight_txt_3d = ft.Text("0.0%", size=14, weight=ft.FontWeight.W_600, color="#ab47bc") 
 
     c1_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_400) 
-    c2_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_400)
     p1_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.BOLD, color=ft.colors.RED_400) 
-    p2_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.BOLD, color=ft.colors.RED_400) 
-
-    skew_25d_txt = ft.Text("0.00% (Neutral)", size=14, weight=ft.FontWeight.BOLD) 
 
     pain_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.W_600) 
     flip_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.W_600, color=ft.colors.ORANGE_400)
     breakout_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.W_600, color=ft.colors.GREEN_ACCENT) 
-    res_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.W_600, color=ft.colors.PURPLE_300)
-    sup_txt = ft.Text("$0.00", size=14, weight=ft.FontWeight.W_600, color=ft.colors.PINK_400) 
-
-    inflows_call_txt = ft.Text("0.0M", size=14, weight=ft.FontWeight.W_600)
-    outflows_put_txt = ft.Text("0.0M", size=14, weight=ft.FontWeight.W_600)
-    net_flow_txt = ft.Text("0.0M", size=14, weight=ft.FontWeight.W_600) 
 
     iv_metric_txt = ft.Text("0.0%", size=14, weight=ft.FontWeight.W_600)
     rv_metric_txt = ft.Text("0.0%", size=14, weight=ft.FontWeight.W_600)
-    vol_variance_txt = ft.Text("0.0% (Neutral)", size=14, weight=ft.FontWeight.BOLD) 
 
     grid_lines_config = ft.ChartGridLines(color=ft.colors.GREY_800, width=0.5)
 
     speed_curr_txt = ft.Text("0.00", size=14, weight=ft.FontWeight.W_600)
     speed_down_txt = ft.Text("0.00", size=14, weight=ft.FontWeight.W_600)
     speed_up_txt = ft.Text("0.00", size=14, weight=ft.FontWeight.W_600)
-    speed_regime_txt = ft.Text("Stable Neutral", size=14, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_400) 
-
-    flow_1h_txt = ft.Text("0.00 Shares", size=14, weight=ft.FontWeight.BOLD)
-    flow_3h_txt = ft.Text("0.00 Shares", size=14, weight=ft.FontWeight.BOLD)
-    flow_6h_txt = ft.Text("0.00 Shares", size=14, weight=ft.FontWeight.BOLD) 
-
-    cohesion_main_txt = ft.Text("0.0 (Neutral)", size=14, weight=ft.FontWeight.BOLD)
-    gex_component_txt = ft.Text("0.0", size=14, color=ft.colors.GREY_400)
-    flow_component_txt = ft.Text("0.0", size=14, color=ft.colors.GREY_400)
-    price_component_txt = ft.Text("0.0", size=14, color=ft.colors.GREY_400)
-    vol_component_txt = ft.Text("0.0", size=14, color=ft.colors.GREY_400) 
-
-    charm_flow_metric_txt = ft.Text("0.0 Shares/hr", size=14, weight=ft.FontWeight.BOLD)
-    charm_bias_txt = ft.Text("Neutral", size=14, weight=ft.FontWeight.BOLD) 
-
-    ndf_drift_metric_txt = ft.Text("$0.0M", size=14, weight=ft.FontWeight.BOLD)
-    ndf_structural_signal_txt = ft.Text("Neutral Absorption", size=14, weight=ft.FontWeight.BOLD) 
-
-    anomaly_txt_1st = ft.Text("--", size=14, weight=ft.FontWeight.W_600, color=ft.colors.CYAN_200)
-    anomaly_txt_2nd = ft.Text("--", size=14, weight=ft.FontWeight.W_600, color=ft.colors.CYAN_200)
-    anomaly_txt_3rd = ft.Text("--", size=14, weight=ft.FontWeight.W_600, color=ft.colors.CYAN_200) 
 
     gex_bar_chart_3d = ft.BarChart(bar_groups=[], bottom_axis=net_axis_3d, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
     abs_gex_chart_3d = ft.BarChart(bar_groups=[], bottom_axis=abs_axis_3d, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
     gex_bar_chart_1m = ft.BarChart(bar_groups=[], bottom_axis=net_axis_1m, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
     abs_gex_chart_1m = ft.BarChart(bar_groups=[], bottom_axis=abs_axis_1m, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
     vanna_bar_chart = ft.BarChart(bar_groups=[], bottom_axis=vanna_bottom_axis, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
-    oi_migration_bar_chart = ft.BarChart(bar_groups=[], bottom_axis=oi_migration_bottom_axis, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
     velocity_bar_chart = ft.BarChart(bar_groups=[], bottom_axis=velocity_bottom_axis, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
     id_skew_bar_chart = ft.BarChart(bar_groups=[], bottom_axis=iv_bottom_axis, left_axis=iv_left_axis, horizontal_grid_lines=grid_lines_config, vertical_grid_lines=grid_lines_config, animate=True, height=240) 
 
@@ -479,15 +430,11 @@ def main(page: ft.Page):
             weight_txt_3d.value = f"{m['call_weight_3d']:.1f}%" 
 
             c1_txt.value = f"${m['c1_wall']:.1f}"
-            c2_txt.value = f"${m['c2_wall']:.1f}"
-            p1_txt.value = f"${m['p1_wall']:.1f}"
-            p2_txt.value = f"${m['p2_wall']:.1f}" 
+            p1_txt.value = f"${m['p1_wall']:.1f}" 
 
             pain_txt.value = f"${m['max_pain']:.1f}"
             flip_txt.value = f"${m['flip']:.1f}"
-            breakout_txt.value = f"${m['breakout']:.1f}"
-            res_txt.value = f"${m['resistance']:.1f}"
-            sup_txt.value = f"${m['support']:.1f}" 
+            breakout_txt.value = f"${m['breakout']:.1f}" 
 
             iv_val, rv_val = m['implied_vol'], m['realized_vol']
             iv_metric_txt.value = f"{iv_val:.1f}%"
@@ -498,7 +445,7 @@ def main(page: ft.Page):
             speed_down_txt.value = f"{sp_down:+.4f}"
             speed_up_txt.value = f"{sp_up:+.4f}" 
 
-            groups_net_3d, groups_abs_3d, groups_net_1m, groups_abs_1m, groups_vanna, groups_oi_migration, groups_velocity, iv_bar_groups, new_labels = [], [], [], [], [], [], [], [], []
+            groups_net_3d, groups_abs_3d, groups_net_1m, groups_abs_1m, groups_vanna, groups_velocity, iv_bar_groups, new_labels = [], [], [], [], [], [], [], [], []
             for item in m['chart_data']:
                 strike_val = item['strike']
                 idx = item['index']
@@ -530,6 +477,7 @@ def main(page: ft.Page):
             
             page.update()
 
+    # --- REFRESH VIEW ELEVATEDBUTTON HAS BEEN REMOVED FROM THIS LAYOUT HEADER ---
     page.add(
         ft.Row([ft.Text("SPY GEX DASHBOARD", size=20, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.START),
         ft.Card(content=ft.Container(content=ft.Row([ft.Text("SPY ETF Spot Price", size=11, color=ft.colors.GREY_500), spot_price_container], alignment=ft.MainAxisAlignment.SPACE_BETWEEN), padding=12)),
