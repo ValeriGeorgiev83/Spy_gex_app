@@ -19,36 +19,29 @@ redis = Redis(
 REDIS_FLOW_KEY = "spy_flow_24h_history"
 REDIS_OI_MIGRATION_KEY = "spy_oi_hourly_history"
 
-# Keep track of the previous ATM IV to find live volatility direction velocity
 last_known_atm_iv = [20.0] 
 
 def native_norm_pdf(x):
-    """Pure mathematical replacement for scipy.stats.norm.pdf to prevent deployment crashes."""
     return (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * (x ** 2)) 
 
 def native_norm_cdf(x):
-    """Pure mathematical approximation for standard normal cumulative distribution function (CDF)."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0))) 
 
 def calculate_speed_for_option(spot, strike, iv, t_days, oi, option_type):
-    """Calculates Option Speed (dGamma/dSpot) scaled for standard SPY ETF contracts."""
     if t_days <= 0 or iv <= 0 or oi <= 0:
         return 0.0
     try:
         t = t_days / 365.0
         d1 = (math.log(spot / strike) + (0.5 * (iv ** 2)) * t) / (iv * math.sqrt(t))
         pdf = native_norm_pdf(d1) 
-
         gamma = pdf / (spot * iv * math.sqrt(t))
         speed_per_contract = (-gamma / spot) * (1.0 + (d1 / (iv * math.sqrt(t)))) 
-
-        footprint = oi * speed_per_contract * 0.01 * 100.0  # Equity contract multiplier is 100
+        footprint = oi * speed_per_contract * 0.01 * 100.0
         return -footprint if option_type == 'P' else footprint
     except Exception:
         return 0.0 
 
 def calculate_realized_vol_10d(ticker_obj):
-    """Calculates annualized close-to-close historical realized volatility using yfinance history matrix."""
     try:
         hist = ticker_obj.history(period="15d")
         if len(hist) < 10:
@@ -56,33 +49,23 @@ def calculate_realized_vol_10d(ticker_obj):
         closes = hist['Close'].tail(10).values
         log_returns = np.diff(np.log(closes))
         daily_std = np.std(log_returns, ddof=1)
-        return float(daily_std * math.sqrt(252) * 100.0) # 252 Equity Trading Days
+        return float(daily_std * math.sqrt(252) * 100.0)
     except Exception:
         return 15.0 
 
 def background_data_worker(symbol="SPY"):
-    """
-    Independent data collection engine running in a separate thread.
-    Calculates 5-minute option chain volume shifts and writes historical premium footprints to Upstash.
-    """
     print("Background Upstash Processing Worker Loop Engaged.")
     ticker = yf.Ticker(symbol)
     
     while True:
         try:
-            print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] Processing backend metrics write...")
-            
-            # Fetch Spot Price via fast_info pipeline safely
             spot_price = float(ticker.fast_info['lastPrice'])
             expirations = ticker.options
-            
             if not expirations:
                 time.sleep(10)
                 continue
                 
             now = datetime.now(timezone.utc)
-            
-            # Limit processing to near-term expirations to save execution bandwidth
             target_expiries = expirations[:5]
             
             current_call_volume_premium = 0.0
@@ -95,17 +78,14 @@ def background_data_worker(symbol="SPY"):
                     expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).replace(hour=16, minute=0)
                     days_to_expiry = (expiry_dt - now).total_seconds() / 86400.0
                     if days_to_expiry < 0: continue
-                except Exception:
-                    continue
+                except Exception: continue
                 
                 try:
                     chain = ticker.option_chain(expiry_str)
                     calls = chain.calls
                     puts = chain.puts
-                except Exception:
-                    continue
+                except Exception: continue
                 
-                # Process Calls
                 for _, row in calls.iterrows():
                     strike = float(row['strike'])
                     oi = float(row.get('openInterest', 0))
@@ -126,7 +106,6 @@ def background_data_worker(symbol="SPY"):
                     except Exception: delta = 0.5
                     net_delta_premium_drift += (delta * notional_value)
 
-                # Process Puts
                 for _, row in puts.iterrows():
                     strike = float(row['strike'])
                     oi = float(row.get('openInterest', 0))
@@ -148,13 +127,9 @@ def background_data_worker(symbol="SPY"):
                     net_delta_premium_drift += (delta * notional_value)
 
             current_ts = now.strftime("%m-%d %H:%M")
-            
-            # --- CALCULATE INTER-INTERVAL INCREMENTAL FLOW ---
             last_logged_element = redis.lindex(REDIS_FLOW_KEY, -1)
             
-            inc_call_flow = 0.0
-            inc_put_flow = 0.0
-            inc_drift = 0.0
+            inc_call_flow, inc_put_flow, inc_drift = 0.0, 0.0, 0.0
             
             if last_logged_element:
                 prev_data = json.loads(last_logged_element)
@@ -188,7 +163,6 @@ def background_data_worker(symbol="SPY"):
             redis.rpush(REDIS_FLOW_KEY, json.dumps(flow_snapshot))
             redis.ltrim(REDIS_FLOW_KEY, -288, -1)
 
-            # Process Open Interest Hourly Shifts Matrix
             if now.minute <= 4:
                 hourly_time_tag = now.strftime("%m-%d %H:%M")
                 base_df = pd.DataFrame(parsed_options)
@@ -204,12 +178,11 @@ def background_data_worker(symbol="SPY"):
 
             print("Background state sync complete.")
         except Exception as loop_ex:
-            print(f"Background Loop Error encountered: {loop_ex}")
+            print(f"Background Loop Error: {loop_ex}")
             
         time.sleep(300)
 
 def fetch_deribit_gex(symbol="SPY"):
-    """Fetches options components and handles matrix array builds for chart visualizations."""
     try:
         ticker = yf.Ticker(symbol)
         spot_price = float(ticker.fast_info['lastPrice'])
@@ -222,9 +195,7 @@ def fetch_deribit_gex(symbol="SPY"):
     min_strike_dist = float('inf')
     net_charm_accumulator = 0.0 
 
-    net_speed_current = 0.0
-    net_speed_down_10 = 0.0
-    net_speed_up_10 = 0.0 
+    net_speed_current, net_speed_down_10, net_speed_up_10 = 0.0, 0.0, 0.0
 
     for expiry_str in expirations[:3]:
         try:
@@ -314,6 +285,8 @@ def fetch_deribit_gex(symbol="SPY"):
     call_gex_3d = df_3d[df_3d['type'] == 'C']['gex'].sum()
     put_gex_3d = df_3d[df_3d['type'] == 'P']['gex'].sum()
     net_gex_3d = call_gex_3d + put_gex_3d
+    total_abs_gex_3d = abs(call_gex_3d) + abs(put_gex_3d)
+    call_weight_pct_3d = (abs(call_gex_3d) / total_abs_gex_3d * 100) if total_abs_gex_3d > 0 else 50.0
 
     center_strike = round(spot_price)
     target_strikes = sorted([s for s in base_df['strike'].unique() if abs(s - center_strike) <= 15])
@@ -326,8 +299,6 @@ def fetch_deribit_gex(symbol="SPY"):
         vanna_val = match_df['vanna'].sum()
         iv_skew_val = match_df['iv'].mean()
         b_vol = match_df['volume'].sum()
-        
-        # --- FIXED SPECIFIC BOUNDARY LOOP LOGIC STATE HERE ---
         b_oi = match_df['oi'].sum()
         velocity_pct = (b_vol / b_oi * 100.0) if b_oi > 0 else 0.0 
 
@@ -339,9 +310,10 @@ def fetch_deribit_gex(symbol="SPY"):
 
     realized_vol_10d_val = calculate_realized_vol_10d(ticker) 
 
+    # --- FIXED RETURN DICTIONARY SCHEMA OVERLAP TARGETS HERE ---
     return {
         "spot": spot_price, "call_gex_1m": call_gex_1m, "put_gex_1m": put_gex_1m, "net_gex_1m": net_gex_1m, "call_weight_1m": call_weight_pct_1m,
-        "call_gex_3d": call_gex_3d, "put_gex_3d": put_gex_3d, "net_gex_3d": net_gex_3d, "call_weight_3d": call_weight_pct_1m,
+        "call_gex_3d": call_gex_3d, "put_gex_3d": put_gex_3d, "net_gex_3d": net_gex_3d, "call_weight_3d": call_weight_pct_3d,
         "max_pain": center_strike, "flip": center_strike - 2, "breakout": center_strike + 5, "resistance": center_strike + 3, "support": center_strike - 3,
         "call_inflow": call_gex_1m, "put_inflow": put_gex_1m, "net_flow": net_gex_1m, "chart_data": chart_matrix,
         "skew_25d": 0.0, "c1_wall": center_strike + 2, "c2_wall": center_strike + 4, "p1_wall": center_strike - 2, "p2_wall": center_strike - 4,
@@ -354,9 +326,6 @@ def fetch_deribit_gex(symbol="SPY"):
 
 def fmt_gex(val):
     return f"{val/1000000.0:+.2f}M"
-
-def fmt_signed_flow(val):
-    return f"${val / 1000000.0:,.1f}M" 
 
 def main(page: ft.Page):
     page.title = "SPY OPTIONS REAL-TIME GEX DASHBOARD"
@@ -477,7 +446,6 @@ def main(page: ft.Page):
             
             page.update()
 
-    # --- REFRESH VIEW ELEVATEDBUTTON HAS BEEN REMOVED FROM THIS LAYOUT HEADER ---
     page.add(
         ft.Row([ft.Text("SPY GEX DASHBOARD", size=20, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.START),
         ft.Card(content=ft.Container(content=ft.Row([ft.Text("SPY ETF Spot Price", size=11, color=ft.colors.GREY_500), spot_price_container], alignment=ft.MainAxisAlignment.SPACE_BETWEEN), padding=12)),
