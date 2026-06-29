@@ -310,7 +310,6 @@ def fetch_deribit_gex(symbol="SPY"):
 
     realized_vol_10d_val = calculate_realized_vol_10d(ticker) 
 
-    # --- FIXED RETURN DICTIONARY SCHEMA OVERLAP TARGETS HERE ---
     return {
         "spot": spot_price, "call_gex_1m": call_gex_1m, "put_gex_1m": put_gex_1m, "net_gex_1m": net_gex_1m, "call_weight_1m": call_weight_pct_1m,
         "call_gex_3d": call_gex_3d, "put_gex_3d": put_gex_3d, "net_gex_3d": net_gex_3d, "call_weight_3d": call_weight_pct_3d,
@@ -414,7 +413,16 @@ def main(page: ft.Page):
             speed_down_txt.value = f"{sp_down:+.4f}"
             speed_up_txt.value = f"{sp_up:+.4f}" 
 
-            groups_net_3d, groups_abs_3d, groups_net_1m, groups_abs_1m, groups_vanna, groups_velocity, iv_bar_groups, new_labels = [], [], [], [], [], [], [], [], []
+            # --- CLEANED INDEPENDENT INITIALIZATION PER LINE TO AVOID TUPLE SIZE VALUEERROR ---
+            groups_net_3d = []
+            groups_abs_3d = []
+            groups_net_1m = []
+            groups_abs_1m = []
+            groups_vanna = []
+            groups_velocity = []
+            iv_bar_groups = []
+            new_labels = []
+
             for item in m['chart_data']:
                 strike_val = item['strike']
                 idx = item['index']
